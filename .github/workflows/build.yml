@@ -17,15 +17,15 @@ jobs:
         run: cargo build --release
       - name: Rename
         shell: cmd
-        run: copy target\release\markitdown-gui.exe "MarkItDown GUI.exe"
+        run: copy target\release\markitdown-gui.exe MarkItDown-GUI.exe
       - uses: actions/upload-artifact@v4
         with:
           name: MarkItDown-GUI
-          path: MarkItDown GUI.exe
+          path: MarkItDown-GUI.exe
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: MarkItDown GUI ${{ github.ref_name }}
           body_path: docs/RELEASE_NOTES.md
-          files: MarkItDown GUI.exe
+          files: MarkItDown-GUI.exe

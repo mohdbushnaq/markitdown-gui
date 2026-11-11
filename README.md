@@ -41,8 +41,8 @@
 ## Download
 
 1. Open the [latest release](https://github.com/mohdbushnaq/markitdown-gui/releases/latest).
-2. Download **`MarkItDown GUI.exe`** (about 7 MB).
-3. Put it in any folder you like and double-click it.
+2. Download **`MarkItDown-GUI.exe`** (about 7 MB).
+3. Put it in any folder you like and double-click it. You can rename it if you like.
 
 That's the whole install. The app is a single portable `.exe` that runs on any 64-bit Windows 10 or 11 PC
 without extra DLLs or admin rights.

@@ -2,7 +2,7 @@ First public release of **MarkItDown GUI**, a portable Windows app for convertin
 
 ## Download
 
-Download **`MarkItDown GUI.exe`** below, put it in any folder and double-click it. No installer, no admin rights, no Python needed.
+Download **`MarkItDown-GUI.exe`** below, put it in any folder and double-click it. No installer, no admin rights, no Python needed.
 On first launch the app sets up its own private Python and MarkItDown automatically (a few minutes, about 500 MB, once).
 
 > Windows may show a SmartScreen warning because the app is not code-signed. Click **More info**, then **Run anyway**.
