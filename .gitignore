@@ -1,0 +1,4 @@
+/target
+*.exe
+MarkItDown GUI runtime/
+*.settings.ron
