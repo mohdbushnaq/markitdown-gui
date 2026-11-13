@@ -1,4 +1,8 @@
-## What's new in 1.1.0
+## What's new in 1.1.1
+
+- Fixed: Ctrl+V and copy/paste now work in text fields, and links (Release notes, Get Python) open in your browser.
+
+## New in 1.1.0
 
 - **Convert web pages by URL.** Paste an address into the new field under the drop zone (or at the top of the list) and press Enter or **Add URL**. Web pages are added to the list like files and saved as `site - page.md`, in your Downloads folder or the output folder you chose.
 
