@@ -482,7 +482,8 @@ impl App {
                 Some(u) => std::ffi::OsString::from(u),
                 None => self.items[i].path.clone().into_os_string(),
             };
-            jobs.push(Job { index: i, input, output, args: args.clone() });
+            let is_url = self.items[i].url.is_some();
+            jobs.push(Job { index: i, input, output, args: args.clone(), is_url });
         }
         if jobs.is_empty() {
             return;

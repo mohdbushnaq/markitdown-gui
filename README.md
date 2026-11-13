@@ -184,6 +184,10 @@ Install the [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/re
 The app finds it automatically on PATH, in pip's user Scripts folders, or via `python -m markitdown`.
 You can also point **Options > markitdown command** at a specific `markitdown.exe` or `python.exe`.
 
+**A web page converts to an empty or almost empty file.**
+Pages built with JavaScript are loaded in a hidden Microsoft Edge (or Chrome) automatically when the direct download is empty.
+Pages behind a sign-in can't be converted; save the page from your browser (Ctrl+S) and convert the saved `.html` file instead.
+
 **Images from Word files are missing.**
 By default MarkItDown replaces images with placeholders. Turn on **Keep embedded images (data URIs)**.
 

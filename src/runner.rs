@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::collections::VecDeque;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -42,6 +42,7 @@ pub struct Job {
     pub input: std::ffi::OsString,
     pub output: PathBuf,
     pub args: Vec<String>,
+    pub is_url: bool,
 }
 
 /// How to invoke markitdown: either the markitdown executable or `python -m markitdown`.
@@ -134,43 +135,197 @@ impl Runner {
         }
     }
 
-    fn convert(&self, job: &Job, env: &[(String, String)], cancel: &AtomicBool) -> Result<PathBuf, String> {
+    /// Runs markitdown once: `input` -> `output`.
+    fn run_once(&self, input: &std::ffi::OsStr, output: &Path, args: &[String], env: &[(String, String)], cancel: &AtomicBool) -> Result<(), String> {
         let mut cmd = self.command();
-        cmd.args(&job.args).arg("-o").arg(&job.output).arg(&job.input).stdout(Stdio::null()).stderr(Stdio::piped());
+        cmd.args(args).arg("-o").arg(output).arg(input).stdout(Stdio::null()).stderr(Stdio::piped());
         for (k, v) in env {
             cmd.env(k, v);
         }
         let mut child = cmd.spawn().map_err(|e| format!("Failed to start markitdown: {e}"))?;
         let mut stderr = child.stderr.take();
         let reader = std::thread::spawn(move || {
-            let mut s = String::new();
+            let mut buf = Vec::new();
             if let Some(e) = stderr.as_mut() {
-                let mut buf = Vec::new();
                 let _ = e.read_to_end(&mut buf);
-                s = String::from_utf8_lossy(&buf).into_owned();
             }
-            s
+            String::from_utf8_lossy(&buf).into_owned()
         });
-        let status = loop {
-            if cancel.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(CANCELLED.into());
-            }
-            match child.try_wait() {
-                Ok(Some(st)) => break st,
-                Ok(None) => std::thread::sleep(Duration::from_millis(60)),
-                Err(e) => return Err(e.to_string()),
-            }
-        };
+        let status = wait_child(&mut child, cancel, None)?;
         let err = reader.join().unwrap_or_default();
-        if status.success() && job.output.exists() {
-            Ok(job.output.clone())
+        if status.success() && output.exists() {
+            Ok(())
         } else if err.trim().is_empty() {
             Err(format!("markitdown exited with {status}"))
         } else {
             Err(err.trim().to_string())
         }
+    }
+
+    fn convert(&self, job: &Job, env: &[(String, String)], cancel: &AtomicBool) -> Result<PathBuf, String> {
+        let direct = self.run_once(&job.input, &job.output, &job.args, env, cancel);
+        if direct.as_ref().err().map(|e| e == CANCELLED).unwrap_or(false) {
+            return Err(CANCELLED.into());
+        }
+        if !job.is_url {
+            return direct.map(|_| job.output.clone());
+        }
+        if direct.is_ok() && has_content(&job.output) {
+            return Ok(job.output.clone());
+        }
+        // Web page came back empty (built by JavaScript) or was blocked:
+        // load it in a hidden browser and convert the finished page instead.
+        let url = job.input.to_string_lossy().into_owned();
+        let rendered = render_page(&url, cancel);
+        if rendered.as_ref().err().map(|e| e == CANCELLED).unwrap_or(false) {
+            let _ = std::fs::remove_file(&job.output);
+            return Err(CANCELLED.into());
+        }
+        let result = rendered.and_then(|html| {
+            let tmp = std::env::temp_dir().join(format!("markitdown-gui-{}-{}.html", std::process::id(), job.index));
+            std::fs::write(&tmp, with_base_href(&html, &url)).map_err(|e| e.to_string())?;
+            let mut args: Vec<String> = job.args.iter().filter(|a| !a.is_empty()).cloned().collect();
+            strip_hint_args(&mut args);
+            let r = self.run_once(tmp.as_os_str(), &job.output, &args, env, cancel);
+            let _ = std::fs::remove_file(&tmp);
+            r
+        });
+        match result {
+            Ok(()) if has_content(&job.output) => Ok(job.output.clone()),
+            Ok(()) => {
+                let _ = std::fs::remove_file(&job.output);
+                Err("The page has no readable text, even after loading it in a browser. It may need a sign-in, or block automated access.".into())
+            }
+            Err(e) if e == CANCELLED => Err(e),
+            Err(e) => {
+                let _ = std::fs::remove_file(&job.output);
+                match direct {
+                    Err(d) => Err(format!("{d}\n\nBrowser fallback: {e}")),
+                    Ok(()) => Err(format!("The page came back empty (it is probably built with JavaScript), and loading it in a browser failed: {e}")),
+                }
+            }
+        }
+    }
+}
+
+/// True when a converted file has real text in it.
+fn has_content(p: &Path) -> bool {
+    std::fs::read_to_string(p).map(|t| t.chars().filter(|c| !c.is_whitespace()).count() >= 20).unwrap_or(false)
+}
+
+/// Input hints (-x/-m/-c) describe the original URL, not the saved HTML file.
+fn strip_hint_args(args: &mut Vec<String>) {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for a in args.drain(..) {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if a == "-x" || a == "-m" || a == "-c" {
+            skip = true;
+            continue;
+        }
+        out.push(a);
+    }
+    *args = out;
+}
+
+/// Adds <base href> so relative links in the saved page still point at the site.
+fn with_base_href(html: &str, url: &str) -> String {
+    let lower = html.to_lowercase();
+    if lower.contains("<base ") {
+        return html.to_string();
+    }
+    let tag = format!("<base href=\"{}\">", url.replace('"', "%22"));
+    match lower.find("<head>") {
+        Some(i) => format!("{}{}{}", &html[..i + 6], tag, &html[i + 6..]),
+        None => format!("{tag}{html}"),
+    }
+}
+
+fn wait_child(child: &mut std::process::Child, cancel: &AtomicBool, timeout: Option<Duration>) -> Result<std::process::ExitStatus, String> {
+    let start = std::time::Instant::now();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CANCELLED.into());
+        }
+        if let Some(t) = timeout {
+            if start.elapsed() > t {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("timed out".into());
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(st)) => return Ok(st),
+            Ok(None) => std::thread::sleep(Duration::from_millis(60)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+/// Microsoft Edge (built into Windows 10/11) or Google Chrome.
+/// Set MARKITDOWN_GUI_BROWSER to use a specific Chromium-based browser.
+fn find_browser() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("MARKITDOWN_GUI_BROWSER") {
+        return Some(PathBuf::from(p));
+    }
+    let mut c: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        for (var, rel) in [
+            ("ProgramFiles(x86)", r"Microsoft\Edge\Application\msedge.exe"),
+            ("ProgramFiles", r"Microsoft\Edge\Application\msedge.exe"),
+            ("LOCALAPPDATA", r"Microsoft\Edge\Application\msedge.exe"),
+            ("ProgramFiles", r"Google\Chrome\Application\chrome.exe"),
+            ("ProgramFiles(x86)", r"Google\Chrome\Application\chrome.exe"),
+            ("LOCALAPPDATA", r"Google\Chrome\Application\chrome.exe"),
+        ] {
+            if let Some(base) = std::env::var_os(var) {
+                c.push(PathBuf::from(base).join(rel));
+            }
+        }
+    } else {
+        for n in ["microsoft-edge", "google-chrome", "chromium", "chromium-browser"] {
+            if let Some(path) = std::env::var_os("PATH") {
+                c.extend(std::env::split_paths(&path).map(|d| d.join(n)));
+            }
+        }
+    }
+    c.into_iter().find(|p| p.is_file())
+}
+
+/// Loads the page in a hidden browser, lets its JavaScript run, and returns the finished HTML.
+fn render_page(url: &str, cancel: &AtomicBool) -> Result<String, String> {
+    let browser = find_browser().ok_or("Microsoft Edge or Google Chrome was not found")?;
+    let profile = std::env::temp_dir().join(format!("markitdown-gui-browser-{}", std::process::id()));
+    let mut child = hidden(&browser.to_string_lossy())
+        .args(["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--mute-audio", "--hide-scrollbars", "--window-size=1366,2000", "--virtual-time-budget=15000"])
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg("--dump-dom")
+        .arg(url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start {}: {e}", browser.display()))?;
+    let mut out = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(o) = out.as_mut() {
+            let _ = o.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let status = wait_child(&mut child, cancel, Some(Duration::from_secs(90)));
+    let html = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
+    let _ = std::fs::remove_dir_all(&profile);
+    status?;
+    if html.contains('<') && html.trim().len() > 50 {
+        Ok(html)
+    } else {
+        Err("the browser returned no page".into())
     }
 }
 
