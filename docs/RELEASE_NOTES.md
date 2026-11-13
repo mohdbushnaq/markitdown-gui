@@ -1,16 +1,19 @@
-## What's new in 1.1.1
+## What's new in 1.2.0
 
-- Fixed: Ctrl+V and copy/paste now work in text fields, and links (Release notes, Get Python) open in your browser.
+- **Install on this PC.** Portable is still the default, but **Options > App > Install on this PC** now installs the app for your Windows user: Start menu (and optional desktop) shortcut, an entry in **Settings > Apps > Installed apps** with a normal uninstaller, and your MarkItDown runtime is moved along so nothing downloads again. No admin rights needed.
+- **App updates.** **Options > Updates > Check for updates** now also checks for new versions of MarkItDown GUI itself. **Update app** downloads the new version, swaps it in and restarts, for portable and installed copies. A green **App x.y.z available** button appears in the title bar when there is one.
+- The Updates section moved to the top of Options, with separate lines for the app and for the MarkItDown converter.
 
-## New in 1.1.0
+## Also in 1.1.x
 
-- **Convert web pages by URL.** Paste an address into the new field under the drop zone (or at the top of the list) and press Enter or **Add URL**. Web pages are added to the list like files and saved as `site - page.md`, in your Downloads folder or the output folder you chose.
+- Convert web pages by URL (field under the drop zone, or at the top of the list).
+- Fixed: Ctrl+V paste in text fields, and links in the app now open in your browser.
 
 ## Download
 
-Download **`MarkItDown-GUI.exe`** below, put it in any folder and double-click it. No installer, no admin rights, no Python needed.
+Download **`MarkItDown-GUI.exe`** below and double-click it. No installer needed, no admin rights, no Python needed.
 On first launch the app sets up its own private Python and MarkItDown automatically (a few minutes, about 500 MB, once).
-Already using 1.0.0? Just replace the `.exe`; your settings and runtime folder are kept.
+Already using an older version? Replace the `.exe`; your settings and runtime are kept. From 1.2.0 on, updates install from inside the app.
 
 > Windows may show a SmartScreen warning because the app is not code-signed. Click **More info**, then **Run anyway**.
 

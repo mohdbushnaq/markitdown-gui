@@ -217,7 +217,7 @@ fn writable_runtime_root() -> Option<PathBuf> {
     })
 }
 
-fn download(url: &str, to: &Path, log: &dyn Fn(String)) -> bool {
+pub fn download(url: &str, to: &Path, log: &dyn Fn(String)) -> bool {
     log(format!("Downloading {url}"));
     let to_s = to.to_string_lossy().into_owned();
     let ok = hidden("curl").args(["-fsSL", "--retry", "2", "--max-time", "900", "-o", &to_s, url]).status().map(|s| s.success()).unwrap_or(false);
@@ -385,4 +385,66 @@ fn run_streaming(program: &str, args: &[&str], log: &dyn Fn(String)) -> (bool, S
     }
     let ok = child.wait().map(|s| s.success()).unwrap_or(false);
     (ok, all)
+}
+
+// ---------------------------------------------------------------------------
+// Updates of MarkItDown GUI itself (from its GitHub releases)
+// ---------------------------------------------------------------------------
+
+pub const APP_REPO: &str = "mohdbushnaq/markitdown-gui";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const APP_ASSET: &str = "MarkItDown-GUI.exe";
+
+/// The tag GitHub redirects /releases/latest to (works when the API is rate-limited).
+fn latest_tag_via_redirect() -> Option<String> {
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let url = format!("https://github.com/{APP_REPO}/releases/latest");
+    let o = hidden("curl").args(["-sS", "--max-time", "20", "-o", null, "-w", "%{redirect_url}", &url]).stdout(Stdio::piped()).stderr(Stdio::null()).output().ok()?;
+    let loc = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    loc.rsplit_once("/tag/").map(|(_, t)| t.to_string()).filter(|t| !t.is_empty())
+}
+
+/// Latest release of MarkItDown GUI.
+pub fn latest_app_release(python: Option<&str>) -> Result<Release, String> {
+    let api = format!("https://api.github.com/repos/{APP_REPO}/releases/latest");
+    if let Ok(body) = http_get(&api, python) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(tag) = v["tag_name"].as_str() {
+                return Ok(Release { version: tag.trim_start_matches('v').to_string(), url: v["html_url"].as_str().unwrap_or("").to_string() });
+            }
+        }
+    }
+    latest_tag_via_redirect()
+        .map(|tag| Release { version: tag.trim_start_matches('v').to_string(), url: format!("https://github.com/{APP_REPO}/releases/tag/{tag}") })
+        .ok_or_else(|| "Could not reach GitHub to check for app updates.".into())
+}
+
+/// Downloads the given version and swaps it in for the running exe.
+/// Windows lets a running exe be renamed, so: current -> .old, new -> current.
+pub fn update_app(version: &str, log: &dyn Fn(String)) -> Result<PathBuf, String> {
+    if !cfg!(windows) {
+        return Err("App updates are only available on Windows.".into());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let new = exe.with_extension("exe.new");
+    let old = exe.with_extension("exe.old");
+    let url = format!("https://github.com/{APP_REPO}/releases/download/v{version}/{APP_ASSET}");
+    let _ = std::fs::remove_file(&new);
+    if !download(&url, &new, log) {
+        return Err("Download failed. Check the internet connection and try again.".into());
+    }
+    let bytes = std::fs::read(&new).map_err(|e| e.to_string())?;
+    if bytes.len() < 1_000_000 || !bytes.starts_with(b"MZ") {
+        let _ = std::fs::remove_file(&new);
+        return Err("The downloaded file is not a valid program.".into());
+    }
+    log("Replacing the app...".into());
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(&exe, &old).map_err(|e| format!("Could not replace the app (no write access to its folder?): {e}"))?;
+    if let Err(e) = std::fs::rename(&new, &exe) {
+        let _ = std::fs::rename(&old, &exe);
+        return Err(format!("Could not replace the app: {e}"));
+    }
+    log(format!("Updated to {version}. Restarting..."));
+    Ok(exe)
 }

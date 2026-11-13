@@ -17,6 +17,9 @@ pub enum Msg {
     WorkerDone,
     Plugins(String),
     Latest(Result<crate::update::Release, String>),
+    AppLatest(Result<crate::update::Release, String>),
+    /// install / uninstall / app update finished: (ok, message, exe path)
+    TaskDone(bool, String, Option<PathBuf>),
     Log(String),
     PipDone,
 }

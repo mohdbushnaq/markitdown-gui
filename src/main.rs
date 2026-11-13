@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod install;
 mod runner;
 mod update;
 
@@ -40,6 +41,7 @@ struct Settings {
     command_override: String,
     open_folder_when_done: bool,
     check_on_startup: bool,
+    desktop_shortcut: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +66,7 @@ impl Default for Settings {
             command_override: String::new(),
             open_folder_when_done: false,
             check_on_startup: true,
+            desktop_shortcut: true,
         }
     }
 }
@@ -157,6 +160,14 @@ fn downloads_dir() -> PathBuf {
     home.join("Downloads")
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Task {
+    Pip,
+    Install,
+    Uninstall,
+    AppUpdate,
+}
+
 enum Detect {
     Searching,
     Found(Runner),
@@ -178,13 +189,24 @@ struct App {
     update_status: String,
     checking: bool,
     checked_once: bool,
-    pip_running: bool,
+    task_running: bool,
     log: Vec<String>,
     show_log: bool,
     auto_setup_tried: bool,
     url_input: String,
     url_error: bool,
+    task: Task,
+    task_result: Option<(bool, String)>,
+    app_latest: Option<Release>,
+    app_status: String,
+    installed_copy: bool,
+    after_task: Option<AfterTask>,
     ctx: egui::Context,
+}
+
+enum AfterTask {
+    Relaunch(PathBuf),
+    Quit,
 }
 
 impl App {
@@ -210,17 +232,25 @@ impl App {
             update_status: String::new(),
             checking: false,
             checked_once: false,
-            pip_running: false,
+            task_running: false,
             log: Vec::new(),
             show_log: false,
             auto_setup_tried: false,
             url_input: String::new(),
             url_error: false,
+            task: Task::Pip,
+            task_result: None,
+            app_latest: None,
+            app_status: String::new(),
+            installed_copy: install::is_installed_copy(),
+            after_task: None,
             ctx: cc.egui_ctx.clone(),
         };
         // Files passed on the command line (e.g. "Open with" or drag onto the .exe).
         for a in std::env::args_os().skip(1) {
-            app.add_path(PathBuf::from(a));
+            if !a.to_string_lossy().starts_with("--") {
+                app.add_path(PathBuf::from(a));
+            }
         }
         app.redetect(&cc.egui_ctx);
         app
@@ -256,17 +286,66 @@ impl App {
             let py = update::find_python(runner.as_ref());
             let _ = tx.send(Msg::Latest(update::latest_release(py.as_deref())));
             ctx.request_repaint();
+            let _ = tx.send(Msg::AppLatest(update::latest_app_release(py.as_deref())));
+            ctx.request_repaint();
         });
     }
 
     fn run_pip(&mut self, ctx: &egui::Context) {
-        if self.pip_running || self.busy() {
+        if self.task_running || self.busy() {
             return;
         }
-        self.pip_running = true;
+        self.task = Task::Pip;
+        self.task_result = None;
+        self.task_running = true;
         self.show_log = true;
         self.log.clear();
         update::pip_install(self.runner(), self.tx.clone(), ctx.clone());
+    }
+
+    /// Runs install / uninstall / app update in the background with the log window.
+    fn run_task(&mut self, task: Task) {
+        if self.task_running || self.busy() {
+            return;
+        }
+        self.task = task;
+        self.task_result = None;
+        self.task_running = true;
+        self.show_log = true;
+        self.log.clear();
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let desktop = self.s.desktop_shortcut;
+        let version = self.app_latest.as_ref().map(|r| r.version.clone()).unwrap_or_default();
+        std::thread::spawn(move || {
+            let log = |s: String| {
+                let _ = tx.send(Msg::Log(s));
+                ctx.request_repaint();
+            };
+            let msg = match task {
+                Task::Install => match install::install(desktop, &log) {
+                    Ok(p) => Msg::TaskDone(true, "Installed for this Windows user.".into(), Some(p)),
+                    Err(e) => Msg::TaskDone(false, e, None),
+                },
+                Task::Uninstall => {
+                    log("Removing shortcuts and the uninstall entry...".into());
+                    match install::uninstall() {
+                        Ok(()) => Msg::TaskDone(true, "Uninstalled. The app will now close.".into(), None),
+                        Err(e) => Msg::TaskDone(false, e, None),
+                    }
+                }
+                Task::AppUpdate => match update::update_app(&version, &log) {
+                    Ok(p) => Msg::TaskDone(true, "Updated. Restarting...".into(), Some(p)),
+                    Err(e) => Msg::TaskDone(false, e, None),
+                },
+                Task::Pip => return,
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    fn app_update_available(&self) -> Option<&Release> {
+        self.app_latest.as_ref().filter(|l| update::is_newer(&l.version, update::APP_VERSION))
     }
 
     fn update_available(&self) -> Option<&Release> {
@@ -497,8 +576,27 @@ impl App {
                     }
                 }
                 Msg::Log(l) => self.log.push(l),
+                Msg::AppLatest(r) => {
+                    self.app_status = match &r {
+                        Ok(l) if update::is_newer(&l.version, update::APP_VERSION) => format!("Latest version: {} (update available)", l.version),
+                        Ok(l) => format!("Latest version: {} (up to date)", l.version),
+                        Err(e) => format!("Latest version: unavailable ({e})"),
+                    };
+                    self.app_latest = r.ok();
+                }
+                Msg::TaskDone(ok, text, path) => {
+                    self.task_running = false;
+                    self.task_result = Some((ok, text));
+                    if ok {
+                        match (self.task, path) {
+                            (Task::AppUpdate, Some(p)) => self.after_task = Some(AfterTask::Relaunch(p)),
+                            (Task::Uninstall, _) => self.after_task = Some(AfterTask::Quit),
+                            _ => {}
+                        }
+                    }
+                }
                 Msg::PipDone => {
-                    self.pip_running = false;
+                    self.task_running = false;
                     let ctx = self.ctx_clone();
                     self.redetect(&ctx);
                 }
@@ -559,6 +657,12 @@ impl eframe::App for App {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &root.ctx().clone();
         self.poll();
+        if let Some(a) = self.after_task.take() {
+            if let AfterTask::Relaunch(exe) = a {
+                let _ = std::process::Command::new(exe).spawn();
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         // Drag and drop
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
@@ -597,8 +701,14 @@ impl eframe::App for App {
 
         if self.show_log {
             let mut open = true;
-            let running = self.pip_running;
-            egui::Window::new(if matches!(self.detect, Detect::Found(_)) { "Update markitdown" } else { "Setting up MarkItDown" }).id(egui::Id::unique("setup_log")).open(&mut open).collapsible(false).resizable(true).default_width(560.0).show(ctx, |ui| {
+            let running = self.task_running;
+            egui::Window::new(match self.task {
+                Task::Pip if matches!(self.detect, Detect::Found(_)) => "Update markitdown",
+                Task::Pip => "Setting up MarkItDown",
+                Task::Install => "Install MarkItDown GUI",
+                Task::Uninstall => "Uninstall MarkItDown GUI",
+                Task::AppUpdate => "Update MarkItDown GUI",
+            }).id(egui::Id::unique("setup_log")).open(&mut open).collapsible(false).resizable(true).default_width(560.0).show(ctx, |ui| {
                 egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
                     for l in &self.log {
                         ui.label(RichText::new(l).monospace().small());
@@ -609,12 +719,26 @@ impl eframe::App for App {
                     if running {
                         ui.spinner();
                         ui.label("Working...");
-                    } else {
+                    } else if self.task == Task::Pip {
                         match &self.detect {
                             Detect::Found(r) => ui.label(RichText::new(format!("Installed: {}", r.version)).color(OK)),
                             Detect::Searching => ui.spinner(),
                             Detect::Missing(_) => ui.label(RichText::new("markitdown is still not available").color(ERR)),
                         };
+                        if ui.button("Close").clicked() {
+                            self.show_log = false;
+                        }
+                    } else {
+                        if let Some((ok, t)) = &self.task_result {
+                            ui.label(RichText::new(t).color(if *ok { OK } else { ERR }));
+                        }
+                        if self.task == Task::Install && matches!(self.task_result, Some((true, _))) {
+                            if let Some(exe) = install::installed_exe() {
+                                if ui.add(egui::Button::new(RichText::new("Open installed app").color(Color32::WHITE)).fill(ACCENT)).on_hover_text("Starts the installed copy and closes this one").clicked() {
+                                    self.after_task = Some(AfterTask::Relaunch(exe));
+                                }
+                            }
+                        }
                         if ui.button("Close").clicked() {
                             self.show_log = false;
                         }
@@ -649,8 +773,16 @@ impl App {
                 }
                 if let Some(l) = self.update_available().cloned() {
                     let b = egui::Button::new(RichText::new(format!("Update to {}", l.version)).color(Color32::WHITE).small()).fill(ACCENT).corner_radius(10);
-                    if ui.add_enabled(!self.busy() && !self.pip_running, b).on_hover_text("Upgrade markitdown with pip").clicked() {
+                    if ui.add_enabled(!self.busy() && !self.task_running, b).on_hover_text("Upgrade markitdown with pip").clicked() {
                         self.run_pip(ctx);
+                    }
+                }
+                if cfg!(windows) {
+                    if let Some(l) = self.app_update_available().cloned() {
+                        let b = egui::Button::new(RichText::new(format!("App {} available", l.version)).color(Color32::WHITE).small()).fill(OK).corner_radius(10);
+                        if ui.add_enabled(!self.busy() && !self.task_running, b).on_hover_text("Download and install the new MarkItDown GUI").clicked() {
+                            self.run_task(Task::AppUpdate);
+                        }
                     }
                 }
                 match &self.detect {
@@ -670,7 +802,7 @@ impl App {
                 ui.label(RichText::new(msg).small().weak());
                 ui.horizontal(|ui| {
                     let b = egui::Button::new(RichText::new("Install markitdown").color(Color32::WHITE)).fill(ACCENT);
-                    if ui.add_enabled(!self.pip_running, b).on_hover_text("Runs: python -m pip install --upgrade markitdown[all]").clicked() {
+                    if ui.add_enabled(!self.task_running, b).on_hover_text("Runs: python -m pip install --upgrade markitdown[all]").clicked() {
                         self.run_pip(ctx);
                     }
                     if ui.button("Detect again").clicked() {
@@ -721,7 +853,7 @@ impl App {
                         ui.spinner();
                     } else {
                         let pending = self.items.iter().any(|i| !matches!(i.status, Status::Done(_)));
-                        let ready = pending && !self.pip_running && matches!(self.detect, Detect::Found(_));
+                        let ready = pending && !self.task_running && matches!(self.detect, Detect::Found(_));
                         let btn = egui::Button::new(RichText::new("Convert").color(Color32::WHITE).strong()).fill(if ready { ACCENT } else { Color32::GRAY }).min_size(egui::vec2(96.0, 30.0));
                         if ui.add_enabled(ready, btn).clicked() {
                             self.start(ctx);
@@ -851,6 +983,7 @@ impl App {
         egui::Panel::right("opts").resizable(false).exact_size(300.0).frame(bar_frame(ctx)).show(root, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_enabled_ui(!self.busy(), |ui| {
+                    self.app_and_update_sections(ui);
                     section(ui, "Output");
                     ui.checkbox(&mut self.s.overwrite, "Overwrite existing .md files")
                         .on_hover_text("When off, a numbered name like \"file (1).md\" is used");
@@ -899,30 +1032,6 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut self.s.azure_key).password(true).hint_text("uses Azure login if empty").desired_width(f32::INFINITY));
                     }
 
-                    section(ui, "Updates");
-                    ui.checkbox(&mut self.s.check_on_startup, "Check for new releases on startup");
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.checking, egui::Button::new("Check now")).clicked() {
-                            self.check_updates(ui.ctx());
-                        }
-                        if self.checking {
-                            ui.spinner();
-                        }
-                        let label = if matches!(self.detect, Detect::Found(_)) { "Upgrade now" } else { "Install" };
-                        if ui.add_enabled(!self.pip_running, egui::Button::new(label)).on_hover_text("python -m pip install --upgrade markitdown[all]").clicked() {
-                            self.run_pip(ui.ctx());
-                        }
-                    });
-                    ui.label(RichText::new(format!("Current release: {}", self.current_release())).small().weak());
-                    if !self.update_status.is_empty() {
-                        ui.label(RichText::new(&self.update_status).small().weak());
-                    }
-                    if let Some(l) = &self.latest {
-                        if !l.url.is_empty() {
-                            ui.hyperlink_to(RichText::new("Release notes").small(), &l.url);
-                        }
-                    }
-
                     section(ui, "markitdown command");
                     let r = ui.add(egui::TextEdit::singleline(&mut self.s.command_override).hint_text("auto-detect").desired_width(f32::INFINITY));
                     r.on_hover_text("Path to markitdown.exe or python.exe. Leave empty to search PATH.");
@@ -931,6 +1040,88 @@ impl App {
                     }
                 });
             });
+        });
+    }
+}
+
+impl App {
+    fn app_and_update_sections(&mut self, ui: &mut egui::Ui) {
+        let win = cfg!(windows);
+        section(ui, "App");
+        let mode = if self.installed_copy { "Installed" } else { "Portable" };
+        ui.label(RichText::new(format!("MarkItDown GUI {}  ·  {mode}", update::APP_VERSION)).small().weak());
+        if self.installed_copy {
+            if ui.add_enabled(win && !self.task_running, egui::Button::new("Uninstall")).on_hover_text("Removes the app, its shortcuts, settings and private runtime from this PC").clicked() {
+                let yes = rfd::MessageDialog::new()
+                    .set_title("Uninstall MarkItDown GUI")
+                    .set_description("Remove MarkItDown GUI, its shortcuts, settings and its private MarkItDown runtime from this PC? Your converted files are kept.")
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .set_level(rfd::MessageLevel::Warning)
+                    .show()
+                    == rfd::MessageDialogResult::Yes;
+                if yes {
+                    self.run_task(Task::Uninstall);
+                }
+            }
+        } else {
+            ui.checkbox(&mut self.s.desktop_shortcut, "Create a desktop shortcut");
+            ui.horizontal(|ui| {
+                let b = egui::Button::new(RichText::new("Install on this PC").color(Color32::WHITE)).fill(ACCENT);
+                let hover = if win { "Copies the app to your user Programs folder, adds a Start menu shortcut and an entry in Windows Installed apps. No admin rights needed." } else { "Only available on Windows" };
+                if ui.add_enabled(win && !self.task_running, b).on_hover_text(hover).clicked() {
+                    self.run_task(Task::Install);
+                }
+                if let Some(exe) = install::installed_exe() {
+                    if ui.button("Open installed").on_hover_text("An installed copy exists. Start it and close this one.").clicked() {
+                        self.after_task = Some(AfterTask::Relaunch(exe));
+                    }
+                }
+            });
+            ui.label(RichText::new("Or keep using it portable, nothing else needed.").small().weak());
+        }
+
+        section(ui, "Updates");
+        ui.checkbox(&mut self.s.check_on_startup, "Check for updates on startup");
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.checking, egui::Button::new("Check for updates")).clicked() {
+                self.check_updates(ui.ctx());
+            }
+            if self.checking {
+                ui.spinner();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("MarkItDown GUI (this app)").small().strong());
+        ui.label(RichText::new(format!("Current version: {}", update::APP_VERSION)).small().weak());
+        if !self.app_status.is_empty() {
+            ui.label(RichText::new(&self.app_status).small().weak());
+        }
+        ui.horizontal(|ui| {
+            if self.app_update_available().is_some() && ui.add_enabled(win && !self.task_running, egui::Button::new("Update app")).clicked() {
+                self.run_task(Task::AppUpdate);
+            }
+            if let Some(l) = &self.app_latest {
+                if !l.url.is_empty() {
+                    ui.hyperlink_to(RichText::new("Release notes").small(), &l.url);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("MarkItDown (converter)").small().strong());
+        ui.label(RichText::new(format!("Current release: {}", self.current_release())).small().weak());
+        if !self.update_status.is_empty() {
+            ui.label(RichText::new(&self.update_status).small().weak());
+        }
+        ui.horizontal(|ui| {
+            let label = if matches!(self.detect, Detect::Found(_)) { "Upgrade now" } else { "Install" };
+            if ui.add_enabled(!self.task_running, egui::Button::new(label)).on_hover_text("python -m pip install --upgrade markitdown[all]").clicked() {
+                self.run_pip(ui.ctx());
+            }
+            if let Some(l) = &self.latest {
+                if !l.url.is_empty() {
+                    ui.hyperlink_to(RichText::new("Release notes").small(), &l.url);
+                }
+            }
         });
     }
 }
@@ -1007,6 +1198,11 @@ fn portable_settings_path() -> Option<PathBuf> {
 }
 
 fn main() -> eframe::Result {
+    if install::handle_cli() {
+        return Ok(());
+    }
+    install::cleanup_old_exe();
+    install::refresh_registered_version();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MarkItDown")

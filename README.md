@@ -27,11 +27,12 @@
 ## Contents
 
 - [Download](#download)
+- [Install on this PC (optional)](#install-on-this-pc-optional)
 - [First run](#first-run)
 - [How to use](#how-to-use)
 - [Features](#features)
 - [Options](#options)
-- [Updating MarkItDown](#updating-markitdown)
+- [Updates](#updates)
 - [Supported formats](#supported-formats)
 - [Where files are stored](#where-files-are-stored)
 - [Troubleshooting](#troubleshooting)
@@ -44,11 +45,24 @@
 2. Download **`MarkItDown-GUI.exe`** (about 7 MB).
 3. Put it in any folder you like and double-click it. You can rename it if you like.
 
-That's the whole install. The app is a single portable `.exe` that runs on any 64-bit Windows 10 or 11 PC
-without extra DLLs or admin rights.
+That's it. The app is a single portable `.exe` that runs on any 64-bit Windows 10 or 11 PC
+without extra DLLs or admin rights. If you prefer a regular installed app, see the next section.
 
 > Windows may show a SmartScreen warning the first time because the app is not code-signed.
 > Click **More info**, then **Run anyway**.
+
+## Install on this PC (optional)
+
+Portable is the default, but the app can also install itself like a normal Windows program:
+
+1. Open **Options** and, under **App**, click **Install on this PC** (optionally with a desktop shortcut).
+2. The app is copied to `%LOCALAPPDATA%\Programs\MarkItDown GUI`, a **Start menu** shortcut is added, and
+   **MarkItDown GUI** appears in **Settings > Apps > Installed apps**.
+3. Your existing MarkItDown runtime and settings are moved along, so nothing is downloaded again.
+4. Click **Open installed app** to switch to the installed copy.
+
+No admin rights are needed because it installs for your Windows user only.
+To remove it, use **Uninstall** under **Options > App**, or uninstall it from Windows Settings like any other app.
 
 ## First run
 
@@ -93,8 +107,8 @@ Click **Stop** at any time to cancel. Running conversions are stopped immediatel
 - Per-file Open, Show in folder, Retry and full error details
 - Every MarkItDown command-line option is available as a setting (see below)
 - Automatic first-run setup with a private Python runtime
-- Checks for new MarkItDown releases and updates with one click
-- Fully portable: settings and runtime live next to the `.exe`
+- Portable by default, or one-click install with Start menu shortcut and a normal Windows uninstaller
+- Checks for new versions of the app and of MarkItDown, and updates either with one click
 - Remembers your settings between sessions
 - Light on resources: a native Rust app (egui), about 7 MB
 
@@ -119,19 +133,21 @@ Click **Options** in the top-right corner.
 | Azure API key | Optional key for the Azure options. Never saved to disk | `AZURE_API_KEY` |
 | markitdown command | Use a specific `markitdown.exe` or `python.exe` instead of auto-detect | |
 
-## Updating MarkItDown
+## Updates
 
 <p align="center">
-  <img src="docs/screenshots/updates.png" width="700" alt="Updates section showing current and latest release">
+  <img src="docs/screenshots/updates.png" width="300" alt="App and Updates sections of the Options panel">
 </p>
 
-- On startup the app checks the [latest MarkItDown release](https://github.com/microsoft/markitdown/releases)
-  (PyPI is used as a fallback). Turn this off with **Check for new releases on startup**.
-- When a newer version exists, an **Update to x.y.z** button appears next to the version in the title bar.
-- **Options > Updates** shows the *Current release* and *Latest release*, with **Check now**, **Upgrade now**
-  and a link to the release notes.
+**Options > Updates** has a **Check for updates** button and checks automatically on startup
+(turn this off with **Check for updates on startup**). It covers two things:
 
-Updating runs `python -m pip install --upgrade "markitdown[all]"` for the Python that owns your MarkItDown and shows the output live.
+- **MarkItDown GUI (this app).** Compares your version with the [latest release here](https://github.com/mohdbushnaq/markitdown-gui/releases/latest).
+  When a newer one exists, click **Update app** (or the green **App x.y.z available** button in the title bar).
+  The new version is downloaded, swapped in and restarted automatically, for both portable and installed copies.
+- **MarkItDown (converter).** Compares your MarkItDown with the [latest Microsoft release](https://github.com/microsoft/markitdown/releases)
+  (PyPI as a fallback). **Upgrade now**, or the **Update to x.y.z** button in the title bar, runs
+  `python -m pip install --upgrade "markitdown[all]"` and shows the output live.
 
 ## Supported formats
 
@@ -145,7 +161,8 @@ Outlook messages (`.msg`), images (EXIF metadata), audio (speech transcription) 
 
 | What | Where |
 |---|---|
-| The app | Wherever you put `MarkItDown GUI.exe` |
+| The app (portable) | Wherever you put the `.exe` |
+| The app (installed) | `%LOCALAPPDATA%\Programs\MarkItDown GUI` |
 | Settings | `MarkItDown GUI.settings.ron` next to the `.exe` |
 | Private Python and MarkItDown | `MarkItDown GUI runtime\` next to the `.exe` |
 
@@ -193,7 +210,8 @@ and reads the result and any errors back into the interface.
 |---|---|
 | `src/main.rs` | User interface, settings and conversion queue |
 | `src/runner.rs` | Finding and running MarkItDown, parallel workers, cancellation |
-| `src/update.rs` | Release checks, private Python setup and pip updates |
+| `src/update.rs` | Release checks, private Python setup, pip updates and app self-update |
+| `src/install.rs` | Optional per-user install, shortcuts, Windows uninstall entry |
 
 ## Credits
 
