@@ -35,7 +35,8 @@ pub fn hidden(program: &str) -> Command {
 
 pub struct Job {
     pub index: usize,
-    pub input: PathBuf,
+    /// A file path or a web URL.
+    pub input: std::ffi::OsString,
     pub output: PathBuf,
     pub args: Vec<String>,
 }

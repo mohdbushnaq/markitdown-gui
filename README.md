@@ -7,7 +7,7 @@
 <p align="center">
   A small, portable Windows app for converting documents to Markdown with
   <a href="https://github.com/microsoft/markitdown">Microsoft MarkItDown</a>.<br>
-  Drag files in, click Convert, get clean <code>.md</code> files. No installer, no command line.
+  Drag files in or paste a web page URL, click Convert, get clean <code>.md</code> files. No installer, no command line.
 </p>
 
 <p align="center">
@@ -72,10 +72,11 @@ Nothing is installed system-wide, nothing is added to PATH, and no admin rights 
   <img src="docs/screenshots/empty.png" width="700" alt="Empty window with drop zone">
 </p>
 
-1. **Add files.** Drag files or whole folders onto the window, click the drop zone, or use **Add files** / **Add folder**.
+1. **Add files or web pages.** Drag files or whole folders onto the window, click the drop zone, or use **Add files** / **Add folder**.
    You can also drop files onto the `.exe` itself.
-2. **Choose where to save.** By default each `.md` is saved **next to its original file**.
-   Pick **Folder:** to send everything to one folder instead.
+   **Or** paste a web page address into the URL field (under the drop zone, or at the top of the list) and press **Enter** or **Add URL**.
+2. **Choose where to save.** By default each `.md` is saved **next to its original file**, and web pages go to your
+   **Downloads** folder. Pick **Folder:** to send everything to one folder instead.
 3. **Click Convert.** Each file shows its status: Ready, Queued, a spinner while converting, then **Done** or the error.
 4. **Open the result.** Use **Open** to open the Markdown file, or **Folder** to show it in File Explorer.
    Failed files have a **Retry** button, and hovering the error shows the full message.
@@ -85,6 +86,7 @@ Click **Stop** at any time to cancel. Running conversions are stopped immediatel
 ## Features
 
 - Batch conversion with drag and drop of files and folders
+- Convert web pages by URL (saved as `site - page.md`)
 - Saves next to each input file by default, or to a folder you choose
 - Never overwrites existing files unless you allow it (uses `name (1).md` instead)
 - Converts several files in parallel (1 to 8 at a time)
@@ -136,7 +138,8 @@ Updating runs `python -m pip install --upgrade "markitdown[all]"` for the Python
 Anything MarkItDown supports, including:
 
 PDF, Word (`.docx`), PowerPoint (`.pptx`), Excel (`.xlsx`, `.xls`), HTML, CSV, JSON, XML, EPUB, ZIP archives,
-Outlook messages (`.msg`), images (EXIF metadata) and audio (speech transcription).
+Outlook messages (`.msg`), images (EXIF metadata), audio (speech transcription) and web pages by URL
+(including Wikipedia articles, YouTube video pages with transcripts, RSS feeds and Bing search results).
 
 ## Where files are stored
 

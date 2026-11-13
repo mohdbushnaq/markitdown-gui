@@ -80,7 +80,81 @@ enum Status {
 
 struct Item {
     path: PathBuf,
+    /// Set for web pages; `path` is unused then.
+    url: Option<String>,
     status: Status,
+}
+
+impl Item {
+    fn title(&self) -> String {
+        match &self.url {
+            Some(u) => u.clone(),
+            None => self.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        }
+    }
+    fn subtitle(&self) -> String {
+        match &self.url {
+            Some(_) => "Web page".into(),
+            None => self.path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+        }
+    }
+}
+
+/// Accepts "example.com/page" or "https://example.com/page"; returns None if it isn't a web address.
+fn normalize_url(raw: &str) -> Option<String> {
+    let t = raw.trim().trim_matches('"').trim();
+    if t.is_empty() || t.contains(char::is_whitespace) {
+        return None;
+    }
+    let lower = t.to_lowercase();
+    let u = if lower.starts_with("http://") || lower.starts_with("https://") { t.to_string() } else { format!("https://{t}") };
+    let host = u.split("://").nth(1)?.split(['/', '?', '#']).next()?;
+    (host.contains('.') || host.starts_with("localhost")).then_some(u)
+}
+
+/// "https://en.wikipedia.org/wiki/Markdown" -> "en.wikipedia.org - Markdown"
+fn url_stem(url: &str) -> String {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let host = parts.next().unwrap_or("page").trim_start_matches("www.").to_string();
+    let last = parts.last().map(|seg| {
+        let seg = percent_decode(seg);
+        match seg.rsplit_once('.') {
+            Some((stem, ext)) if ext.len() <= 5 && !stem.is_empty() => stem.to_string(),
+            _ => seg,
+        }
+    });
+    let name = match last {
+        Some(l) => format!("{host} - {l}"),
+        None => host,
+    };
+    let clean: String = name.chars().map(|c| if r#"\/:*?"<>|"#.contains(c) || c.is_control() { '_' } else { c }).collect();
+    clean.chars().take(90).collect::<String>().trim().trim_end_matches('.').to_string()
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = |c: u8| (c as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn downloads_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
+    home.join("Downloads")
 }
 
 enum Detect {
@@ -108,6 +182,8 @@ struct App {
     log: Vec<String>,
     show_log: bool,
     auto_setup_tried: bool,
+    url_input: String,
+    url_error: bool,
     ctx: egui::Context,
 }
 
@@ -138,6 +214,8 @@ impl App {
             log: Vec::new(),
             show_log: false,
             auto_setup_tried: false,
+            url_input: String::new(),
+            url_error: false,
             ctx: cc.egui_ctx.clone(),
         };
         // Files passed on the command line (e.g. "Open with" or drag onto the .exe).
@@ -231,7 +309,46 @@ impl App {
 
     fn add_file(&mut self, p: PathBuf) {
         if !self.items.iter().any(|i| i.path == p) {
-            self.items.push(Item { path: p, status: Status::Pending });
+            self.items.push(Item { path: p, url: None, status: Status::Pending });
+        }
+    }
+
+    /// Adds the URL typed in the URL field. Returns false if it isn't a valid web address.
+    fn add_url_input(&mut self) -> bool {
+        let Some(u) = normalize_url(&self.url_input) else {
+            self.url_error = !self.url_input.trim().is_empty();
+            return false;
+        };
+        if !self.items.iter().any(|i| i.url.as_deref() == Some(u.as_str())) {
+            self.items.push(Item { path: PathBuf::new(), url: Some(u), status: Status::Pending });
+        }
+        self.url_input.clear();
+        self.url_error = false;
+        true
+    }
+
+    fn url_field(&mut self, ui: &mut egui::Ui, width: f32) {
+        let busy = self.busy();
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut self.url_input).hint_text("Paste a web page URL, e.g. https://example.com/article").desired_width(width));
+                if r.changed() {
+                    self.url_error = false;
+                }
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Add URL").clicked() || enter {
+                    self.add_url_input();
+                }
+            });
+        });
+        let target = match (&self.s.custom_output, &self.s.output_dir) {
+            (true, Some(d)) => d.display().to_string(),
+            _ => downloads_dir().display().to_string(),
+        };
+        if self.url_error {
+            ui.label(RichText::new("That doesn't look like a web address.").small().color(ERR));
+        } else {
+            ui.label(RichText::new(format!("Web pages are saved to {}", elide(&target, 60))).small().weak()).on_hover_text(target);
         }
     }
 
@@ -239,12 +356,18 @@ impl App {
         self.active > 0
     }
 
-    fn output_for(&self, input: &Path, reserved: &mut HashSet<PathBuf>) -> PathBuf {
-        let dir = match (&self.s.custom_output, &self.s.output_dir) {
-            (true, Some(d)) => d.clone(),
+    fn output_for(&self, item: &Item, reserved: &mut HashSet<PathBuf>) -> PathBuf {
+        let input = item.path.as_path();
+        let dir = match (&self.s.custom_output, &self.s.output_dir, &item.url) {
+            (true, Some(d), _) => d.clone(),
+            (_, _, Some(_)) => downloads_dir(),
             _ => input.parent().map(Path::to_path_buf).unwrap_or_default(),
         };
-        let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "output".into());
+        let stem = match &item.url {
+            Some(u) => url_stem(u),
+            None => input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "output".into()),
+        };
+        let stem = if stem.is_empty() { "page".to_string() } else { stem };
         let mut out = dir.join(format!("{stem}.md"));
         let mut n = 1;
         while out == input || reserved.contains(&out) || (!self.s.overwrite && out.exists()) {
@@ -271,12 +394,16 @@ impl App {
             if matches!(self.items[i].status, Status::Done(_) | Status::Running | Status::Queued) {
                 continue;
             }
-            let output = self.output_for(&self.items[i].path, &mut reserved);
+            let output = self.output_for(&self.items[i], &mut reserved);
             if let Some(d) = output.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
             self.items[i].status = Status::Queued;
-            jobs.push(Job { index: i, input: self.items[i].path.clone(), output, args: args.clone() });
+            let input = match &self.items[i].url {
+                Some(u) => std::ffi::OsString::from(u),
+                None => self.items[i].path.clone().into_os_string(),
+            };
+            jobs.push(Job { index: i, input, output, args: args.clone() });
         }
         if jobs.is_empty() {
             return;
@@ -618,16 +745,32 @@ impl App {
         let resp = ui.allocate_rect(rect, egui::Sense::click());
         let stroke_col = if hovering || resp.hovered() { ACCENT } else { ui.visuals().weak_text_color() };
         ui.painter().rect(rect, CornerRadius::same(14), if hovering { ACCENT.gamma_multiply(0.08) } else { Color32::TRANSPARENT }, Stroke::new(1.5, stroke_col), egui::StrokeKind::Inside);
-        let c = rect.center();
-        ui.painter().text(c - egui::vec2(0.0, 12.0), egui::Align2::CENTER_CENTER, "Drop files or folders here", egui::FontId::proportional(18.0), ui.visuals().strong_text_color());
-        ui.painter().text(c + egui::vec2(0.0, 14.0), egui::Align2::CENTER_CENTER, "or click to browse", egui::FontId::proportional(13.0), ui.visuals().weak_text_color());
-        ui.painter().text(c + egui::vec2(0.0, 34.0), egui::Align2::CENTER_CENTER, "PDF · Word · Excel · PowerPoint · HTML · images · audio · ZIP", egui::FontId::proportional(12.0), ui.visuals().weak_text_color());
         if resp.clicked() && !self.busy() {
             self.pick_files();
         }
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
+
+        // Content is laid out on top of the clickable area; the URL field takes its own clicks.
+        const CONTENT_H: f32 = 196.0;
+        let inner = egui::Rect::from_center_size(rect.center(), egui::vec2((rect.width() - 40.0).min(520.0), CONTENT_H));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+            ui.label(RichText::new("Drop files or folders here").size(18.0).color(ui.visuals().strong_text_color()));
+            ui.label(RichText::new("or click to browse").size(13.0).weak());
+            ui.label(RichText::new("PDF · Word · Excel · PowerPoint · HTML · images · audio · ZIP").size(12.0).weak());
+            ui.add_space(16.0);
+            // "OR" divider
+            let (r, _) = ui.allocate_exact_size(egui::vec2(inner.width(), 18.0), egui::Sense::hover());
+            let col = ui.visuals().weak_text_color().gamma_multiply(0.6);
+            let y = r.center().y;
+            ui.painter().line_segment([egui::pos2(r.left(), y), egui::pos2(r.center().x - 22.0, y)], Stroke::new(1.0, col));
+            ui.painter().line_segment([egui::pos2(r.center().x + 22.0, y), egui::pos2(r.right(), y)], Stroke::new(1.0, col));
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "OR", egui::FontId::proportional(12.0), ui.visuals().weak_text_color());
+            ui.add_space(14.0);
+            let w = inner.width() - 90.0;
+            self.url_field(ui, w);
+        });
     }
 
     fn file_list(&mut self, ui: &mut egui::Ui, hovering: bool) {
@@ -637,16 +780,20 @@ impl App {
         let busy = self.busy();
         let mut remove = None;
         let mut retry = None;
+        ui.add_space(4.0);
+        let w = (ui.available_width() - 90.0).max(200.0);
+        self.url_field(ui, w);
+        ui.add_space(4.0);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(4.0);
             for (i, it) in self.items.iter().enumerate() {
                 egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 7)).corner_radius(8).fill(ui.visuals().faint_bg_color).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        let name = it.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                        let dir = it.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                        let name = it.title();
+                        let dir = it.subtitle();
                         ui.vertical(|ui| {
-                            ui.label(RichText::new(&name).strong());
+                            ui.label(RichText::new(elide(&name, 64)).strong()).on_hover_text(&name);
                             ui.label(RichText::new(elide(&dir, 70)).small().weak()).on_hover_text(&dir);
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
